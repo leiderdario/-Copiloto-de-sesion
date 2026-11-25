@@ -121,7 +121,8 @@ function setupStorageIpcHandlers() {
 
     ipcMain.handle('storage:get-groq-api-key', async () => {
         try {
-            return { success: true, data: storage.getGroqApiKey() };
+            // Solo la clave guardada en ajustes: la de la variable de entorno nunca se envía al renderer.
+            return { success: true, data: storage.getCredentials().groqApiKey || '' };
         } catch (error) {
             console.error('Error getting Groq API key:', error);
             return { success: false, error: error.message };

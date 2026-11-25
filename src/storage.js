@@ -202,7 +202,8 @@ function setApiKey(apiKey) {
 }
 
 function getGroqApiKey() {
-    return getCredentials().groqApiKey || '';
+    // Los ajustes tienen prioridad; si no hay clave guardada, se usa la variable de entorno.
+    return getCredentials().groqApiKey || process.env.GROQ_API_KEY || '';
 }
 
 function setGroqApiKey(groqApiKey) {
