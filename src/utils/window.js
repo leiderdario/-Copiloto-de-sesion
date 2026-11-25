@@ -156,7 +156,10 @@ function updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, geminiSessi
     if (keybinds.toggleVisibility) {
         try {
             globalShortcut.register(keybinds.toggleVisibility, () => {
-                if (mainWindow.isVisible()) {
+                // Minimizada cuenta como "visible": hay que restaurarla, no ocultarla.
+                if (mainWindow.isMinimized()) {
+                    mainWindow.restore();
+                } else if (mainWindow.isVisible()) {
                     mainWindow.hide();
                 } else {
                     mainWindow.showInactive();
