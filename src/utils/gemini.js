@@ -4,7 +4,6 @@ const { spawn } = require('child_process');
 const { saveDebugAudio } = require('../audioUtils');
 const { getSystemPrompt } = require('./prompts');
 const { getAvailableModel, incrementLimitCount, getApiKey, getGroqApiKey, incrementCharUsage, getConfig } = require('../storage');
-const { connectCloud, sendCloudAudio, sendCloudText, sendCloudImage, closeCloud, isCloudActive, setOnTurnComplete } = require('./cloud');
 const { startTransportLog, logTransportEvent, closeTransportLog } = require('./transportLogger');
 
 // Lazy-loaded to avoid circular dependency (localai.js imports from gemini.js)
@@ -14,8 +13,10 @@ function getLocalAi() {
     return _localai;
 }
 
-// Provider mode: 'byok', 'cloud', or 'local'
-let currentProviderMode = 'byok';
+// Provider mode: 'groq-free' (por defecto), 'byok' o 'local'.
+// 'cloud' (servidor del autor) eliminado y Gemini Live desactivado (F9).
+// En 'groq-free' el audio se descarta hasta que exista groq-stt (Fase 1).
+let currentProviderMode = 'groq-free';
 
 // Groq conversation history for context
 let groqConversationHistory = [];
@@ -919,8 +920,8 @@ async function startMacOSAudioCapture(geminiSessionRef) {
 
             const monoChunk = CHANNELS === 2 ? convertStereoToMono(chunk) : chunk;
 
-            if (currentProviderMode === 'cloud') {
-                sendCloudAudio(monoChunk);
+            if (currentProviderMode === 'groq-free') {
+                // Fase 1: aquí se enviará a groq-stt.
             } else if (currentProviderMode === 'local') {
                 getLocalAi().processLocalAudio(monoChunk);
             } else {
@@ -1053,32 +1054,21 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
     // Store the geminiSessionRef globally for reconnection access
     global.geminiSessionRef = geminiSessionRef;
 
-    ipcMain.handle('initialize-cloud', async (event, token, profile, userContext) => {
-        try {
-            currentProviderMode = 'cloud';
-            initializeNewSession(profile);
-            setOnTurnComplete((transcription, response) => {
-                saveConversationTurn(transcription, response);
-            });
-            sendToRenderer('session-initializing', true);
-            await connectCloud(token, profile, userContext);
-            sendToRenderer('session-initializing', false);
-            return true;
-        } catch (err) {
-            console.error('[Cloud] Init error:', err);
-            currentProviderMode = 'byok';
-            sendToRenderer('session-initializing', false);
+    ipcMain.handle('initialize-groq-free', async (event, profile = 'interview', customPrompt = '') => {
+        if (!hasGroqKey()) {
+            console.error('[groq-free] Falta la clave de Groq (ajustes o GROQ_API_KEY)');
             return false;
         }
+        currentProviderMode = 'groq-free';
+        initializeNewSession(profile, customPrompt);
+        currentSystemPrompt = getSystemPrompt(profile, customPrompt, false);
+        console.log('[groq-free] Sesión iniciada (sin Gemini ni cloud)');
+        return true;
     });
 
-    ipcMain.handle('initialize-gemini', async (event, apiKey, customPrompt, profile = 'interview', language = 'en-US') => {
-        currentProviderMode = 'byok';
-        const session = await initializeGeminiSession(apiKey, customPrompt, profile, language);
-        if (session) {
-            geminiSessionRef.current = session;
-            return true;
-        }
+    // Gemini Live desactivado (F9): nunca se abre la conexión.
+    ipcMain.handle('initialize-gemini', async () => {
+        console.warn('[F9] Gemini Live está desactivado en esta versión');
         return false;
     });
 
@@ -1086,7 +1076,7 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
         currentProviderMode = 'local';
         const success = await getLocalAi().initializeLocalSession(localLlmModel, whisperModel, profile, customPrompt);
         if (!success) {
-            currentProviderMode = 'byok';
+            currentProviderMode = 'groq-free';
         }
         return success;
     });
@@ -1094,21 +1084,15 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
     ipcMain.handle('cancel-local-initialization', async () => {
         const cancelled = await getLocalAi().cancelLocalInitialization();
         if (cancelled) {
-            currentProviderMode = 'byok';
+            currentProviderMode = 'groq-free';
         }
         return cancelled;
     });
 
     ipcMain.handle('send-audio-content', async (event, { data, mimeType }) => {
-        if (currentProviderMode === 'cloud') {
-            try {
-                const pcmBuffer = Buffer.from(data, 'base64');
-                sendCloudAudio(pcmBuffer);
-                return { success: true };
-            } catch (error) {
-                console.error('Error sending cloud audio:', error);
-                return { success: false, error: error.message };
-            }
+        if (currentProviderMode === 'groq-free') {
+            // Fase 1: aquí se enviará a groq-stt. Por ahora se descarta.
+            return { success: true };
         }
         if (currentProviderMode === 'local') {
             try {
@@ -1135,15 +1119,9 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
 
     // Handle microphone audio on a separate channel
     ipcMain.handle('send-mic-audio-content', async (event, { data, mimeType }) => {
-        if (currentProviderMode === 'cloud') {
-            try {
-                const pcmBuffer = Buffer.from(data, 'base64');
-                sendCloudAudio(pcmBuffer);
-                return { success: true };
-            } catch (error) {
-                console.error('Error sending cloud mic audio:', error);
-                return { success: false, error: error.message };
-            }
+        if (currentProviderMode === 'groq-free') {
+            // A6: el micrófono nunca sale del PC.
+            return { success: true };
         }
         if (currentProviderMode === 'local') {
             try {
@@ -1184,12 +1162,9 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
 
             process.stdout.write('!');
 
-            if (currentProviderMode === 'cloud') {
-                const sent = sendCloudImage(data);
-                if (!sent) {
-                    return { success: false, error: 'Cloud connection not active' };
-                }
-                return { success: true, model: 'cloud' };
+            if (currentProviderMode === 'groq-free') {
+                if (!hasGroqKey()) return { success: false, error: 'Falta la clave de Groq' };
+                return await sendImageToGroq(data, prompt);
             }
 
             if (currentProviderMode === 'local') {
@@ -1197,7 +1172,7 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
                 return result;
             }
 
-            const result = hasGroqKey() ? await sendImageToGroq(data, prompt) : await sendImageToGeminiHttp(data, prompt);
+            const result = hasGroqKey() ? await sendImageToGroq(data, prompt) : { success: false, error: 'Falta la clave de Groq' }; // sin respaldo de Gemini (F9)
             return result;
         } catch (error) {
             console.error('Error sending image:', error);
@@ -1210,15 +1185,11 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
             return { success: false, error: 'Invalid text message' };
         }
 
-        if (currentProviderMode === 'cloud') {
-            try {
-                console.log('Sending text to cloud:', text);
-                sendCloudText(text.trim());
-                return { success: true };
-            } catch (error) {
-                console.error('Error sending cloud text:', error);
-                return { success: false, error: error.message };
-            }
+        if (currentProviderMode === 'groq-free') {
+            if (!hasGroqKey()) return { success: false, error: 'Falta la clave de Groq' };
+            groqRequestStartedForTurn = true;
+            sendToGroq(text.trim());
+            return { success: true };
         }
 
         if (currentProviderMode === 'local') {
@@ -1280,16 +1251,14 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
         try {
             stopMacOSAudioCapture();
 
-            if (currentProviderMode === 'cloud') {
-                closeCloud();
-                currentProviderMode = 'byok';
+            if (currentProviderMode === 'groq-free') {
                 closeTransportLog();
                 return { success: true };
             }
 
             if (currentProviderMode === 'local') {
                 getLocalAi().closeLocalSession();
-                currentProviderMode = 'byok';
+                currentProviderMode = 'groq-free';
                 closeTransportLog();
                 return { success: true };
             }

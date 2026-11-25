@@ -173,23 +173,11 @@ async function cancelLocalInitialization() {
     return ipcRenderer.invoke('cancel-local-initialization');
 }
 
-async function initializeCloud(profile = 'interview') {
-    const creds = await storage.getCredentials();
-    const token = creds.cloudToken;
-    if (!token || !token.trim()) {
-        cheatingDaddy.setStatus('error');
-        return false;
-    }
-
+async function initializeGroqFree(profile = 'interview') {
     const prefs = await storage.getPreferences();
-    const success = await ipcRenderer.invoke('initialize-cloud', token, profile, prefs.customPrompt || '');
-    if (success) {
-        cheatingDaddy.setStatus('Live');
-        return true;
-    } else {
-        cheatingDaddy.setStatus('error');
-        return false;
-    }
+    const success = await ipcRenderer.invoke('initialize-groq-free', profile, prefs.customPrompt || '');
+    cheatingDaddy.setStatus(success ? 'Live' : 'error');
+    return success;
 }
 
 // Listen for status updates
@@ -1086,7 +1074,7 @@ const cheatingDaddy = {
 
     // Core functionality
     initializeGemini,
-    initializeCloud,
+    initializeGroqFree,
     initializeLocal,
     cancelLocalInitialization,
     startCapture,

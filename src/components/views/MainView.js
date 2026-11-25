@@ -755,10 +755,10 @@ export class MainView extends LitElement {
                 cheatingDaddy.storage.getCredentials().catch(() => ({})),
             ]);
 
-            const storedMode = prefs.providerMode || 'byok';
-            this._mode = storedMode === 'cloud' ? 'byok' : storedMode;
+            const storedMode = prefs.providerMode || 'groq-free';
+            this._mode = storedMode === 'local' ? 'local' : 'groq-free';
 
-            if (storedMode === 'cloud') {
+            if (storedMode !== this._mode) {
                 await cheatingDaddy.storage.updatePreference('providerMode', this._mode);
             }
 
@@ -1022,13 +1022,7 @@ export class MainView extends LitElement {
     _handleStart() {
         if (this.isInitializing || this.downloadProgress.active) return;
 
-        if (this._mode === 'byok') {
-            if (!this._geminiKey.trim()) {
-                this._keyError = true;
-                this.requestUpdate();
-                return;
-            }
-        } else if (this._mode === 'local') {
+        if (this._mode === 'local') {
             if (!this._localLlmModel.trim()) {
                 return;
             }
@@ -1158,36 +1152,7 @@ export class MainView extends LitElement {
 
     _renderByokMode() {
         return html`
-            <details class="config-section">
-                <summary class="config-summary">
-                    <span class="config-summary-text">
-                        <span class="config-summary-title">Transcription</span>
-                        <span class="config-summary-description">Gemini Live connection</span>
-                    </span>
-                    ${this._renderConfigChevron()}
-                </summary>
-                <div class="config-content">
-                    <div class="form-group">
-                        <label class="form-label">Gemini API Key</label>
-                        <input
-                            type="password"
-                            placeholder="Required"
-                            .value=${this._geminiKey}
-                            @input=${e => this._saveGeminiKey(e.target.value)}
-                            class=${this._keyError ? 'error' : ''}
-                        />
-                        <div class="form-hint">
-                            <span class="link" @click=${() => this.onExternalLink('https://aistudio.google.com/apikey')}>Get Gemini key</span>
-                        </div>
-                    </div>
-
-                    <div class="form-group">
-                        <label class="form-label">Gemini Live Model</label>
-                        <input type="text" .value=${this._geminiLiveModel} @input=${e => this._saveGeminiLiveModel(e.target.value)} />
-                    </div>
-                </div>
-            </details>
-
+            <!-- Transcripción con Gemini Live desactivada (F9). Groq Whisper llega en la Fase 1. -->
             <details class="config-section">
                 <summary class="config-summary">
                     <span class="config-summary-text">
@@ -1311,7 +1276,7 @@ export class MainView extends LitElement {
             <!-- Cloud promo intentionally removed from the active UI. -->
 
             <div class="mode-links">
-                <button class="mode-link" @click=${() => this._saveMode('byok')}>Use own API keys</button>
+                <button class="mode-link" @click=${() => this._saveMode('groq-free')}>Use Groq (free)</button>
             </div>
         `;
     }
@@ -1344,7 +1309,7 @@ export class MainView extends LitElement {
                 <div class="page-subtitle">${this._mode === 'byok' ? 'Bring your own API keys' : 'Run models locally on your machine'}</div>
 
                 <!-- Cloud mode render branch intentionally disabled. -->
-                ${this._mode === 'byok' ? this._renderByokMode() : ''} ${this._mode === 'local' ? this._renderLocalMode() : ''}
+                ${this._mode === 'groq-free' ? this._renderByokMode() : ''} ${this._mode === 'local' ? this._renderLocalMode() : ''}
             </div>
             ${this._mode === 'local' && this._showLocalHelp ? this._renderLocalHelp(closeIcon) : ''}
         `;
@@ -1406,7 +1371,7 @@ export class MainView extends LitElement {
                             class="help-cloud-btn"
                             @click=${() => {
                                 this._closeLocalHelp();
-                                this._saveMode('byok');
+                                this._saveMode('groq-free');
                             }}
                         >
                             Switch to BYOK

@@ -597,19 +597,11 @@ export class CheatingDaddyApp extends LitElement {
 
     async handleStart() {
         const prefs = await cheatingDaddy.storage.getPreferences();
-        const providerMode = prefs.providerMode === 'cloud' ? 'byok' : prefs.providerMode || 'byok';
+        // 'cloud' y 'byok' (Gemini Live) desactivados (F9): se usan como 'groq-free'.
+        const providerMode = prefs.providerMode === 'local' ? 'local' : 'groq-free';
 
-        if (providerMode === 'cloud') {
-            const creds = await cheatingDaddy.storage.getCredentials();
-            if (!creds.cloudToken || creds.cloudToken.trim() === '') {
-                const mainView = this.shadowRoot.querySelector('main-view');
-                if (mainView && mainView.triggerApiKeyError) {
-                    mainView.triggerApiKeyError();
-                }
-                return;
-            }
-
-            const success = await cheatingDaddy.initializeCloud(this.selectedProfile);
+        if (providerMode === 'groq-free') {
+            const success = await cheatingDaddy.initializeGroqFree(this.selectedProfile);
             if (!success) {
                 const mainView = this.shadowRoot.querySelector('main-view');
                 if (mainView && mainView.triggerApiKeyError) {
@@ -626,17 +618,6 @@ export class CheatingDaddyApp extends LitElement {
                 }
                 return;
             }
-        } else {
-            const apiKey = await cheatingDaddy.storage.getApiKey();
-            if (!apiKey || apiKey === '') {
-                const mainView = this.shadowRoot.querySelector('main-view');
-                if (mainView && mainView.triggerApiKeyError) {
-                    mainView.triggerApiKeyError();
-                }
-                return;
-            }
-
-            await cheatingDaddy.initializeGemini(this.selectedProfile, this.selectedLanguage);
         }
 
         cheatingDaddy.startCapture(this.selectedScreenshotInterval, this.selectedImageQuality);
