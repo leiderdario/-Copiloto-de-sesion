@@ -1193,7 +1193,7 @@ export class MainView extends LitElement {
                     </label>
 
                     <div class="config-note">
-                        If the Groq API key is empty, Gemini Live is used for answers instead. Its answer quality may be lower.
+                        Groq is required. If this field is empty, the GROQ_API_KEY environment variable is used.
                     </div>
                 </div>
             </details>
@@ -1304,9 +1304,9 @@ export class MainView extends LitElement {
                                   <button class="help-btn" @click=${this._openLocalHelp} aria-label="Open Local AI help">${helpIcon}</button>
                               </div>
                           `
-                        : html` <div class="page-title">${html`Cheating Daddy <span class="mode-suffix">BYOK</span>`}</div> `
+                        : html` <div class="page-title">${html`Cheating Daddy <span class="mode-suffix">Groq free</span>`}</div> `
                 }
-                <div class="page-subtitle">${this._mode === 'byok' ? 'Bring your own API keys' : 'Run models locally on your machine'}</div>
+                <div class="page-subtitle">${this._mode === 'local' ? 'Run models locally on your machine' : 'Groq free tier · no Gemini, no cloud'}</div>
 
                 <!-- Cloud mode render branch intentionally disabled. -->
                 ${this._mode === 'groq-free' ? this._renderByokMode() : ''} ${this._mode === 'local' ? this._renderLocalMode() : ''}
@@ -1363,7 +1363,7 @@ export class MainView extends LitElement {
                             <div class="help-section-title">Computer hanging or slow?</div>
                             <div class="help-section-text">
                                 Running models locally uses a lot of RAM and CPU. If your computer slows down or freezes, it's likely the LLM. Switch
-                                back to BYOK mode if you want to use a hosted provider instead.
+                                back to Groq (free) if you want to use a hosted provider instead.
                             </div>
                         </div>
 
@@ -1374,7 +1374,7 @@ export class MainView extends LitElement {
                                 this._saveMode('groq-free');
                             }}
                         >
-                            Switch to BYOK
+                            Switch to Groq (free)
                         </button>
                     </div>
                 </section>
