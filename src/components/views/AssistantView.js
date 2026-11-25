@@ -298,6 +298,187 @@ export class AssistantView extends LitElement {
             height: calc(100% + 2px);
             pointer-events: none;
         }
+
+        /* ── Dos columnas: Escucha | Pantalla ── */
+
+        .split {
+            flex: 1;
+            display: flex;
+            min-height: 0;
+        }
+
+        .col {
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+            min-height: 0;
+        }
+
+        .col-listen {
+            flex: 0 0 42%;
+            border-right: 1px solid var(--border);
+        }
+
+        .col-screen {
+            flex: 1;
+        }
+
+        .col-head {
+            display: flex;
+            align-items: center;
+            gap: var(--space-sm);
+            padding: var(--space-xs) var(--space-md);
+            border-bottom: 1px solid var(--border);
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+            min-height: 34px;
+        }
+
+        .col-title {
+            font-weight: var(--font-weight-semibold);
+            color: var(--text-primary);
+        }
+
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #666;
+            flex-shrink: 0;
+        }
+
+        .dot.listening {
+            background: #2ecc71;
+            animation: pulse 1.6s ease-in-out infinite;
+        }
+
+        .dot.paused {
+            background: #f1c40f;
+        }
+
+        .dot.limited,
+        .dot.error {
+            background: #e74c3c;
+        }
+
+        @keyframes pulse {
+            50% {
+                opacity: 0.35;
+            }
+        }
+
+        .spacer {
+            flex: 1;
+        }
+
+        .pill-btn {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            cursor: pointer;
+            font-size: var(--font-size-xs);
+            font-family: var(--font-mono);
+            padding: 2px 10px;
+            border-radius: 100px;
+            white-space: nowrap;
+        }
+
+        .pill-btn:hover {
+            border-color: var(--accent);
+        }
+
+        .pill-btn.on {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .usage {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            padding: var(--space-xs) var(--space-md);
+            border-bottom: 1px solid var(--border);
+            font-size: var(--font-size-xs);
+            font-family: var(--font-mono);
+            color: var(--text-muted);
+        }
+
+        .usage-row {
+            display: flex;
+            align-items: center;
+            gap: var(--space-sm);
+        }
+
+        .usage-label {
+            flex: 0 0 92px;
+        }
+
+        .bar {
+            flex: 1;
+            height: 5px;
+            background: var(--bg-elevated);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .bar > span {
+            display: block;
+            height: 100%;
+            background: #2ecc71;
+        }
+
+        .bar > span.warn {
+            background: #f1c40f;
+        }
+
+        .bar > span.crit {
+            background: #e74c3c;
+        }
+
+        .usage-val {
+            flex: 0 0 auto;
+            min-width: 120px;
+            text-align: right;
+        }
+
+        .transcript {
+            flex: 1;
+            overflow-y: auto;
+            padding: var(--space-sm) var(--space-md);
+            font-size: var(--font-size-sm);
+            line-height: 1.5;
+            color: var(--text-primary);
+            user-select: text;
+        }
+
+        .transcript * {
+            user-select: text;
+            cursor: text;
+        }
+
+        .seg {
+            margin-bottom: 8px;
+        }
+
+        .seg-time {
+            font-family: var(--font-mono);
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+            margin-right: 6px;
+        }
+
+        .notice {
+            margin-bottom: 8px;
+            padding: 4px 8px;
+            border-left: 3px solid #f1c40f;
+            background: rgba(241, 196, 15, 0.08);
+            font-size: var(--font-size-xs);
+        }
+
+        .empty {
+            color: var(--text-muted);
+            font-size: var(--font-size-xs);
+        }
     `;
 
     static properties = {
@@ -307,6 +488,11 @@ export class AssistantView extends LitElement {
         onSendText: { type: Function },
         shouldAnimateResponse: { type: Boolean },
         isAnalyzing: { type: Boolean, state: true },
+        _transcript: { state: true },
+        _sttState: { state: true },
+        _sttUsage: { state: true },
+        _llmUsage: { state: true },
+        _sttLang: { state: true },
     };
 
     constructor() {
@@ -317,6 +503,11 @@ export class AssistantView extends LitElement {
         this.onSendText = () => {};
         this.isAnalyzing = false;
         this._animFrame = null;
+        this._transcript = []; // solo en memoria (F6)
+        this._sttState = { state: 'listening', message: '' };
+        this._sttUsage = null;
+        this._llmUsage = null;
+        this._sttLang = 'es';
     }
 
     getProfileNames() {
@@ -334,7 +525,7 @@ export class AssistantView extends LitElement {
         const profileNames = this.getProfileNames();
         return this.responses.length > 0 && this.currentResponseIndex >= 0
             ? this.responses[this.currentResponseIndex]
-            : `Listening to your ${profileNames[this.selectedProfile] || 'session'}...`;
+            : 'Pulsa **Analyze Screen** o `Ctrl+Enter` para analizar la pantalla.';
     }
 
     renderMarkdown(content) {
@@ -439,7 +630,128 @@ export class AssistantView extends LitElement {
             ipcRenderer.on('navigate-next-response', this.handleNextResponse);
             ipcRenderer.on('scroll-response-up', this.handleScrollUp);
             ipcRenderer.on('scroll-response-down', this.handleScrollDown);
+
+            // ── Escucha (Fase 1) ──
+            this.handleSttSegment = (e, seg) => this._addTranscript({ kind: 'seg', text: seg.text, at: seg.at });
+            this.handleSttStatus = (e, st) => {
+                this._sttState = st;
+                if ((st.state === 'warning' || st.state === 'limited' || st.state === 'error') && st.message) {
+                    this._addTranscript({ kind: 'notice', text: st.message, at: Date.now() });
+                }
+            };
+            this.handleSttUsage = (e, u) => (this._sttUsage = u);
+            this.handleLlmUsage = (e, u) => (this._llmUsage = u);
+            ipcRenderer.on('stt:segment', this.handleSttSegment);
+            ipcRenderer.on('stt:status', this.handleSttStatus);
+            ipcRenderer.on('stt:usage', this.handleSttUsage);
+            ipcRenderer.on('llm:usage', this.handleLlmUsage);
+            ipcRenderer.invoke('stt:get-state').then(s => {
+                if (s) {
+                    this._sttLang = s.language;
+                    if (s.paused) this._sttState = { state: 'paused', message: '' };
+                }
+            });
         }
+    }
+
+    _addTranscript(item) {
+        const list = [...this._transcript, item];
+        this._transcript = list.length > 300 ? list.slice(-300) : list;
+        // Desplazamiento automático solo si el usuario ya estaba abajo.
+        const box = this.shadowRoot && this.shadowRoot.querySelector('.transcript');
+        const atBottom = !box || box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+        if (atBottom) {
+            this.updateComplete.then(() => {
+                const b = this.shadowRoot.querySelector('.transcript');
+                if (b) b.scrollTop = b.scrollHeight;
+            });
+        }
+    }
+
+    async _togglePause() {
+        const { ipcRenderer } = window.require('electron');
+        const paused = await ipcRenderer.invoke('stt:set-paused', this._sttState.state !== 'paused');
+        this._sttState = { state: paused ? 'paused' : 'listening', message: '' };
+    }
+
+    async _setLang(lang) {
+        const { ipcRenderer } = window.require('electron');
+        this._sttLang = await ipcRenderer.invoke('stt:set-language', lang);
+    }
+
+    _fmtDur(sec) {
+        if (sec === null || sec === undefined || isNaN(sec)) return '—';
+        sec = Math.max(0, Math.round(sec));
+        const h = Math.floor(sec / 3600);
+        const m = Math.floor((sec % 3600) / 60);
+        return h > 0 ? `${h} h ${String(m).padStart(2, '0')} min` : `${m} min ${String(sec % 60).padStart(2, '0')} s`;
+    }
+
+    _bar(remaining, limit) {
+        if (remaining === null || remaining === undefined || !limit) return html`<div class="bar"></div>`;
+        const pct = Math.max(0, Math.min(100, (remaining / limit) * 100));
+        const cls = pct < 10 ? 'crit' : pct < 25 ? 'warn' : '';
+        return html`<div class="bar"><span class=${cls} style="width:${pct}%"></span></div>`;
+    }
+
+    _renderUsage() {
+        const u = this._sttUsage;
+        const l = this._llmUsage;
+        const dayRemaining = u ? Math.max(0, u.dayAudioLimitSec - u.dayAudioSec) : null;
+        const hourRemaining = u ? u.hourRemainingAudioSec : null;
+        const llmReq = l && l.remainingRequestsDay !== null ? Number(l.remainingRequestsDay) : null;
+        const llmLimit = l && l.limitRequestsDay !== null ? Number(l.limitRequestsDay) : null;
+        return html`
+            <div class="usage" title="Voz que aún se puede transcribir (los silencios no cuentan). Hoy = estimación local; esta hora = dato de Groq.">
+                <div class="usage-row">
+                    <span class="usage-label">Voz esta hora</span>
+                    ${this._bar(hourRemaining, u && u.hourAudioLimitSec)}
+                    <span class="usage-val">${hourRemaining === null ? 'sin datos aún' : `quedan ${this._fmtDur(hourRemaining)}`}</span>
+                </div>
+                <div class="usage-row">
+                    <span class="usage-label">Voz hoy</span>
+                    ${this._bar(dayRemaining, u && u.dayAudioLimitSec)}
+                    <span class="usage-val">${dayRemaining === null ? '—' : `quedan ≈${this._fmtDur(dayRemaining)}`}</span>
+                </div>
+                <div class="usage-row">
+                    <span class="usage-label">Capturas hoy</span>
+                    ${this._bar(llmReq, llmLimit)}
+                    <span class="usage-val">${llmReq === null ? 'sin datos aún' : `quedan ${llmReq} de ${llmLimit}`}</span>
+                </div>
+            </div>
+        `;
+    }
+
+    _renderListenColumn() {
+        const st = this._sttState.state;
+        const label =
+            st === 'paused' ? 'En pausa' : st === 'limited' ? 'Esperando límite de Groq' : st === 'stopped' ? 'Detenida' : 'Escuchando';
+        const fmtTime = t => new Date(t).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+        return html`
+            <section class="col col-listen">
+                <div class="col-head">
+                    <span class="dot ${st}"></span>
+                    <span class="col-title">🎧 Escucha</span>
+                    <span>${label}</span>
+                    <span class="spacer"></span>
+                    <button class="pill-btn ${this._sttLang === 'es' ? 'on' : ''}" @click=${() => this._setLang('es')} title="Idioma de la sesión">ES</button>
+                    <button class="pill-btn ${this._sttLang === 'en' ? 'on' : ''}" @click=${() => this._setLang('en')} title="Idioma de la sesión">EN</button>
+                    <button class="pill-btn" @click=${this._togglePause}>${st === 'paused' ? '▶ Reanudar' : '⏸ Pausar'}</button>
+                </div>
+                ${this._renderUsage()}
+                <div class="transcript">
+                    ${this._transcript.length === 0
+                        ? html`<div class="empty">
+                              ${st === 'paused' ? 'Escucha en pausa: no se envía audio a Groq.' : 'Esperando voz del audio del sistema…'}
+                          </div>`
+                        : this._transcript.map(item =>
+                              item.kind === 'notice'
+                                  ? html`<div class="notice">🟨 ${item.text}</div>`
+                                  : html`<div class="seg"><span class="seg-time">${fmtTime(item.at)}</span>${item.text}</div>`
+                          )}
+                </div>
+            </section>
+        `;
     }
 
     disconnectedCallback() {
@@ -452,6 +764,10 @@ export class AssistantView extends LitElement {
             if (this.handleNextResponse) ipcRenderer.removeListener('navigate-next-response', this.handleNextResponse);
             if (this.handleScrollUp) ipcRenderer.removeListener('scroll-response-up', this.handleScrollUp);
             if (this.handleScrollDown) ipcRenderer.removeListener('scroll-response-down', this.handleScrollDown);
+            if (this.handleSttSegment) ipcRenderer.removeListener('stt:segment', this.handleSttSegment);
+            if (this.handleSttStatus) ipcRenderer.removeListener('stt:status', this.handleSttStatus);
+            if (this.handleSttUsage) ipcRenderer.removeListener('stt:usage', this.handleSttUsage);
+            if (this.handleLlmUsage) ipcRenderer.removeListener('llm:usage', this.handleLlmUsage);
         }
     }
 
@@ -668,6 +984,13 @@ export class AssistantView extends LitElement {
         const hasMultipleResponses = this.responses.length > 1;
 
         return html`
+          <div class="split">
+            ${this._renderListenColumn()}
+            <section class="col col-screen">
+            <div class="col-head">
+                <span class="col-title">🖥️ Pantalla</span>
+                <span>Solo cuando tú lo pides (botón o Ctrl+Enter)</span>
+            </div>
             <div class="response-container" id="responseContainer"></div>
 
             ${hasMultipleResponses ? html`
@@ -705,6 +1028,8 @@ export class AssistantView extends LitElement {
                     </span>
                 </button>
             </div>
+            </section>
+          </div>
         `;
     }
 }
