@@ -3,7 +3,9 @@ const { BrowserWindow, ipcMain } = require('electron');
 const { spawn } = require('child_process');
 const { saveDebugAudio } = require('../audioUtils');
 const { getSystemPrompt } = require('./prompts');
-const { getAvailableModel, incrementLimitCount, getApiKey, getGroqApiKey, incrementCharUsage, getConfig } = require('../storage');
+const { getAvailableModel, incrementLimitCount, getApiKey, getGroqApiKey, incrementCharUsage, getConfig, getConfigDir } = require('../storage');
+const path = require('path');
+const { createGroqStt, DEFAULTS: STT_DEFAULTS } = require('./groq-stt');
 const { startTransportLog, logTransportEvent, closeTransportLog } = require('./transportLogger');
 
 // Lazy-loaded to avoid circular dependency (localai.js imports from gemini.js)
@@ -11,6 +13,51 @@ let _localai = null;
 function getLocalAi() {
     if (!_localai) _localai = require('./localai');
     return _localai;
+}
+
+// ── Transcripción con Groq Whisper (Fase 1) ──
+const STT_GLOSSARY =
+    'Clase de análisis de datos: Excel, MySQL, Python, pandas, Spark, SQL. Particionado, skew, shuffle, broadcast join, ' +
+    'idempotencia, linaje, catálogo de datos, upsert, CDC, SLA, ventana temporal, watermark, compactación, JOIN, GROUP BY, ' +
+    'BUSCARV, SUMAR.SI.CONJUNTO, tabla dinámica, DataFrame.';
+let sttLanguage = 'es';
+let _stt = null;
+function getStt() {
+    if (!_stt) {
+        _stt = createGroqStt({
+            getApiKey: getGroqApiKey,
+            getOptions: () => {
+                const config = getConfig();
+                return {
+                    ...STT_DEFAULTS,
+                    model: config.groqSttModel || STT_DEFAULTS.model,
+                    language: sttLanguage,
+                    prompt: STT_GLOSSARY,
+                };
+            },
+            usageFile: path.join(getConfigDir(), 'stt-usage.json'),
+            onSegment: seg => sendToRenderer('stt:segment', seg),
+            onStatus: st => sendToRenderer('stt:status', st),
+            onUsage: u => sendToRenderer('stt:usage', u),
+        });
+    }
+    return _stt;
+}
+
+// Envía al renderer los límites que Groq devuelve en las cabeceras del LLM.
+function reportLlmUsage(response, model) {
+    const h = name => {
+        const v = response.headers.get(name);
+        return v === null ? null : v;
+    };
+    sendToRenderer('llm:usage', {
+        model,
+        limitRequestsDay: h('x-ratelimit-limit-requests'),
+        remainingRequestsDay: h('x-ratelimit-remaining-requests'),
+        limitTokensMin: h('x-ratelimit-limit-tokens'),
+        remainingTokensMin: h('x-ratelimit-remaining-tokens'),
+        resetTokens: h('x-ratelimit-reset-tokens'),
+    });
 }
 
 // Provider mode: 'groq-free' (por defecto), 'byok' o 'local'.
@@ -320,6 +367,7 @@ async function sendToGroq(transcription) {
             }),
         });
 
+        reportLlmUsage(response, modelToUse);
         if (!response.ok) {
             const errorText = await response.text();
             console.error('Groq API error:', response.status, errorText);
@@ -464,6 +512,7 @@ async function sendImageToGroq(base64Data, prompt) {
             }),
         });
 
+        reportLlmUsage(response, model);
         if (!response.ok) {
             const errorText = await response.text();
             console.error('Groq image API error:', response.status, errorText);
@@ -921,7 +970,7 @@ async function startMacOSAudioCapture(geminiSessionRef) {
             const monoChunk = CHANNELS === 2 ? convertStereoToMono(chunk) : chunk;
 
             if (currentProviderMode === 'groq-free') {
-                // Fase 1: aquí se enviará a groq-stt.
+                getStt().pushPcm(monoChunk);
             } else if (currentProviderMode === 'local') {
                 getLocalAi().processLocalAudio(monoChunk);
             } else {
@@ -1054,6 +1103,16 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
     // Store the geminiSessionRef globally for reconnection access
     global.geminiSessionRef = geminiSessionRef;
 
+    ipcMain.handle('stt:set-paused', async (event, paused) => getStt().setPaused(paused));
+    ipcMain.handle('stt:set-language', async (event, lang) => {
+        sttLanguage = lang === 'en' ? 'en' : 'es';
+        return sttLanguage;
+    });
+    ipcMain.handle('stt:get-state', async () => {
+        getStt().emitUsage();
+        return { paused: getStt().isPaused(), language: sttLanguage };
+    });
+
     ipcMain.handle('initialize-groq-free', async (event, profile = 'interview', customPrompt = '') => {
         if (!hasGroqKey()) {
             console.error('[groq-free] Falta la clave de Groq (ajustes o GROQ_API_KEY)');
@@ -1062,6 +1121,7 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
         currentProviderMode = 'groq-free';
         initializeNewSession(profile, customPrompt);
         currentSystemPrompt = getSystemPrompt(profile, customPrompt, false);
+        getStt().start();
         console.log('[groq-free] Sesión iniciada (sin Gemini ni cloud)');
         return true;
     });
@@ -1091,7 +1151,7 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
 
     ipcMain.handle('send-audio-content', async (event, { data, mimeType }) => {
         if (currentProviderMode === 'groq-free') {
-            // Fase 1: aquí se enviará a groq-stt. Por ahora se descarta.
+            getStt().pushPcm(Buffer.from(data, 'base64'));
             return { success: true };
         }
         if (currentProviderMode === 'local') {
@@ -1252,6 +1312,7 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
             stopMacOSAudioCapture();
 
             if (currentProviderMode === 'groq-free') {
+                getStt().stop();
                 closeTransportLog();
                 return { success: true };
             }
