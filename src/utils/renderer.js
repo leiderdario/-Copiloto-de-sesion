@@ -581,8 +581,8 @@ async function captureManualScreenshot(imageQuality = null) {
         return;
     }
 
-    // Downscale to max 1280px wide for faster transfer — vision models don't need 4K
-    const MAX_WIDTH = 1280;
+    // Hasta 1920 px de ancho: a 1280 px el texto pequeño (código, celdas) se lee mal.
+    const MAX_WIDTH = 1920;
     const srcW = hiddenVideo.videoWidth;
     const srcH = hiddenVideo.videoHeight;
     let destW = srcW;
@@ -619,7 +619,11 @@ async function captureManualScreenshot(imageQuality = null) {
 
             const reader = new FileReader();
             reader.onloadend = async () => {
-                const base64data = reader.result.split(',')[1];
+                let base64data = reader.result.split(',')[1];
+                // PNG sin pérdida para leer bien el texto; si pasa de ~3,5 MB (límite de Groq: 4 MB en base64), JPEG alto.
+                if (base64data && base64data.length > 3.5 * 1024 * 1024) {
+                    base64data = offscreenCanvas.toDataURL('image/jpeg', 0.92).split(',')[1];
+                }
 
                 if (!base64data || base64data.length < 100) {
                     console.error('Invalid base64 data generated');
@@ -644,7 +648,7 @@ async function captureManualScreenshot(imageQuality = null) {
             };
             reader.readAsDataURL(blob);
         },
-        'image/jpeg',
+        'image/png',
         qualityValue
     );
 }
