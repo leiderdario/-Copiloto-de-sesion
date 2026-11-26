@@ -197,31 +197,34 @@ function concat(arrays) {
     return out;
 }
 
-// ---------- Contador diario (solo números) ----------
+// ---------- Cupo diario estimado (solo números) ----------
+// Groq recarga los límites de forma continua (cubeta): el cupo diario de audio se
+// rellena a razón de capacidad/86 400 s por segundo, no de golpe a medianoche.
+// Las cabeceras no informan del cupo diario de audio, así que se estima en local.
 
-function createDailyCounter(file) {
-    const today = () => new Date().toISOString().slice(0, 10); // día UTC
-    let state = { date: today(), audioSec: 0, requests: 0 };
+function createBucket(file, capacity, now = () => Date.now()) {
+    const ratePerMs = capacity / 86400000;
+    let state = { level: capacity, t: now() };
     try {
         const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
-        if (saved.date === state.date) state = saved;
+        if (typeof saved.level === 'number' && typeof saved.t === 'number') state = saved;
     } catch (_) {}
-    function roll() {
-        if (state.date !== today()) state = { date: today(), audioSec: 0, requests: 0 };
+    function refill() {
+        const t = now();
+        state = { level: Math.min(capacity, state.level + (t - state.t) * ratePerMs), t };
     }
     return {
-        add(audioSec) {
-            roll();
-            state.audioSec += audioSec;
-            state.requests += 1;
+        use(sec) {
+            refill();
+            state.level = Math.max(0, state.level - sec);
             try {
                 fs.mkdirSync(path.dirname(file), { recursive: true });
                 fs.writeFileSync(file, JSON.stringify(state));
             } catch (_) {}
         },
-        get() {
-            roll();
-            return { ...state };
+        remaining() {
+            refill();
+            return state.level;
         },
     };
 }
@@ -230,7 +233,7 @@ function createDailyCounter(file) {
 
 function createGroqStt({ getApiKey, getOptions, usageFile, onSegment, onStatus, onUsage, fetchImpl = fetch }) {
     let segmenter = createSegmenter(getOptions());
-    const counter = createDailyCounter(usageFile);
+    const dayBucket = createBucket(usageFile, getOptions().dailyAudioLimitSec);
     const queue = [];
     let busy = false;
     let active = false; // sesión iniciada
@@ -247,11 +250,10 @@ function createGroqStt({ getApiKey, getOptions, usageFile, onSegment, onStatus, 
 
     function usage() {
         const o = getOptions();
-        const day = counter.get();
         onUsage({
-            dayAudioSec: day.audioSec,
+            at: Date.now(),
+            dayRemainingAudioSec: dayBucket.remaining(),
             dayAudioLimitSec: o.dailyAudioLimitSec,
-            dayRequests: day.requests,
             dayRequestLimit: o.dailyRequestLimit,
             hourRemainingAudioSec: lastHeaders.remainingAudioHour,
             hourAudioLimitSec: o.hourlyAudioLimitSec,
@@ -387,7 +389,7 @@ function createGroqStt({ getApiKey, getOptions, usageFile, onSegment, onStatus, 
 
                 const json = await res.json();
                 const latencyMs = Date.now() - t0;
-                counter.add(Math.max(10, durSec)); // estimación prudente: Groq factura como mínimo 10 s
+                dayBucket.use(durSec); // medido: la cabecera horaria descuenta la duración real, sin mínimo de 10 s
                 sessionSentSec += durSec;
 
                 // Descarta segmentos que Whisper considera sin voz.
@@ -427,6 +429,7 @@ function createGroqStt({ getApiKey, getOptions, usageFile, onSegment, onStatus, 
 
 module.exports = {
     createGroqStt,
+    createBucket,
     createSegmenter,
     resample,
     toWav,
