@@ -6,6 +6,8 @@ const { getSystemPrompt } = require('./prompts');
 const { getAvailableModel, incrementLimitCount, getApiKey, getGroqApiKey, incrementCharUsage, getConfig, getConfigDir } = require('../storage');
 const path = require('path');
 const { createGroqStt, DEFAULTS: STT_DEFAULTS } = require('./groq-stt');
+const { createQuestionEngine } = require('./question-engine');
+const { VISION_PROMPT, SCREEN_CHAT_PROMPT, NO_SCREEN_PROMPT } = require('./prompts-copiloto');
 const { startTransportLog, logTransportEvent, closeTransportLog } = require('./transportLogger');
 
 // Lazy-loaded to avoid circular dependency (localai.js imports from gemini.js)
@@ -36,7 +38,10 @@ function getStt() {
                 };
             },
             usageFile: path.join(getConfigDir(), 'stt-usage.json'),
-            onSegment: seg => sendToRenderer('stt:segment', seg),
+            onSegment: seg => {
+                sendToRenderer('stt:segment', seg);
+                getQuestionEngine().addSegment(seg);
+            },
             onStatus: st => sendToRenderer('stt:status', st),
             onUsage: u => sendToRenderer('stt:usage', u),
         });
@@ -59,6 +64,71 @@ function reportLlmUsage(response, model) {
         resetTokens: h('x-ratelimit-reset-tokens'),
     });
 }
+
+// Mensaje claro para los límites de Groq (sin reintentos automáticos: F2).
+function friendlyGroqError(status, bodyText) {
+    if (status !== 429) return `Error de Groq (HTTP ${status})`;
+    let msg = '';
+    try {
+        msg = JSON.parse(bodyText).error.message || '';
+    } catch (_) {
+        msg = bodyText || '';
+    }
+    const wait = /try again in ([\d.]+)(ms|s|m)/i.exec(msg);
+    const secs = wait ? Math.ceil(parseFloat(wait[1]) * (wait[2] === 'm' ? 60 : wait[2] === 'ms' ? 0.001 : 1)) : null;
+    const kind = /output tokens per minute|OTPM/i.test(msg)
+        ? 'tokens de respuesta por minuto (1.000/min en la capa gratuita)'
+        : /tokens per minute|TPM/i.test(msg)
+          ? 'tokens por minuto'
+          : /requests per day|RPD/i.test(msg)
+            ? 'peticiones del día'
+            : /requests per minute|RPM/i.test(msg)
+              ? 'peticiones por minuto'
+              : 'uso';
+    return `🟨 Límite de Groq: ${kind}. ${secs !== null ? `Vuelve a intentarlo en ${secs} s.` : 'Espera un momento y vuelve a intentarlo.'}`;
+}
+
+function imageMime(b64) {
+    return b64.startsWith('iVBOR') ? 'image/png' : 'image/jpeg';
+}
+
+// Llamada corta a Groq en modo JSON (sin thinking) para el motor de preguntas.
+async function groqJson(messages) {
+    const config = getConfig();
+    const model = config.groqModel;
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${getGroqApiKey()}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            model,
+            messages,
+            response_format: { type: 'json_object' },
+            temperature: 0.2,
+            max_completion_tokens: 900, // capa gratuita: 1.000 tokens de salida por minuto
+            ...getGroqReasoningOptions(model, true),
+        }),
+    });
+    reportLlmUsage(res, model);
+    if (!res.ok) throw new Error(friendlyGroqError(res.status, await res.text()).replace(/^🟨 /, ''));
+    const json = await res.json();
+    return json.choices?.[0]?.message?.content || '';
+}
+
+let _questionEngine = null;
+function getQuestionEngine() {
+    if (!_questionEngine) {
+        _questionEngine = createQuestionEngine({
+            callLlm: groqJson,
+            getLanguage: () => sttLanguage,
+            onCard: card => sendToRenderer('qa:card', card),
+            onNotice: message => sendToRenderer('stt:status', { state: 'warning', message }),
+        });
+    }
+    return _questionEngine;
+}
+
+// true cuando la última captura está fijada como contexto del chat de Pantalla.
+let screenContextPinned = false;
 
 // Provider mode: 'groq-free' (por defecto), 'byok' o 'local'.
 // 'cloud' (servidor del autor) eliminado y Gemini Live desactivado (F9).
@@ -320,7 +390,7 @@ function getGroqReasoningOptions(model, disableThinking) {
     return {};
 }
 
-async function sendToGroq(transcription) {
+async function sendToGroq(transcription, displayPrefix = '') {
     const groqApiKey = getGroqApiKey();
     if (!groqApiKey) {
         console.log('No Groq API key configured, skipping Groq response');
@@ -347,7 +417,9 @@ async function sendToGroq(transcription) {
     });
 
     if (groqConversationHistory.length > 20) {
-        groqConversationHistory = groqConversationHistory.slice(-20);
+        // La captura analizada (2 primeros mensajes) se mantiene como contexto fijo.
+        const pinned = screenContextPinned ? groqConversationHistory.slice(0, 2) : [];
+        groqConversationHistory = [...pinned, ...groqConversationHistory.slice(pinned.length).slice(-(20 - pinned.length))];
     }
 
     try {
@@ -361,7 +433,7 @@ async function sendToGroq(transcription) {
                 model: modelToUse,
                 messages: [{ role: 'system', content: currentSystemPrompt || 'You are a helpful assistant.' }, ...groqConversationHistory],
                 stream: true,
-                temperature: 0.7,
+                temperature: currentProviderMode === 'groq-free' ? 0.3 : 0.7,
                 max_completion_tokens: GROQ_MAX_COMPLETION_TOKENS,
                 ...getGroqReasoningOptions(modelToUse, config.disableGroqThinking),
             }),
@@ -376,6 +448,7 @@ async function sendToGroq(transcription) {
                 body: errorText,
             });
             sendToRenderer('update-status', `Groq error: ${response.status}`);
+            if (currentProviderMode === 'groq-free') sendToRenderer('new-response', displayPrefix + friendlyGroqError(response.status, errorText));
             return;
         }
 
@@ -411,7 +484,7 @@ async function sendToGroq(transcription) {
                             fullText += token;
                             const displayText = stripThinkingTags(fullText);
                             if (displayText) {
-                                sendToRenderer(isFirst ? 'new-response' : 'update-response', displayText);
+                                sendToRenderer(isFirst ? 'new-response' : 'update-response', displayPrefix + displayText);
                                 isFirst = false;
                             }
                         }
@@ -491,7 +564,7 @@ async function sendImageToGroq(base64Data, prompt) {
             body: JSON.stringify({
                 model,
                 messages: [
-                    { role: 'system', content: currentSystemPrompt || 'You are a helpful assistant.' },
+                    { role: 'system', content: currentProviderMode === 'groq-free' ? NO_SCREEN_PROMPT : currentSystemPrompt || 'You are a helpful assistant.' },
                     {
                         role: 'user',
                         content: [
@@ -499,14 +572,14 @@ async function sendImageToGroq(base64Data, prompt) {
                             {
                                 type: 'image_url',
                                 image_url: {
-                                    url: `data:image/jpeg;base64,${base64Data}`,
+                                    url: `data:${imageMime(base64Data)};base64,${base64Data}`,
                                 },
                             },
                         ],
                     },
                 ],
                 stream: true,
-                temperature: 0.7,
+                temperature: currentProviderMode === 'groq-free' ? 0.2 : 0.7,
                 max_completion_tokens: GROQ_MAX_COMPLETION_TOKENS,
                 ...getGroqReasoningOptions(model, config.disableGroqThinking),
             }),
@@ -520,7 +593,7 @@ async function sendImageToGroq(base64Data, prompt) {
                 status: response.status,
                 body: errorText,
             });
-            return { success: false, error: `Groq error: ${response.status}` };
+            return { success: false, error: friendlyGroqError(response.status, errorText) };
         }
 
         logTransportEvent('groq.image.http_response', {
@@ -580,6 +653,21 @@ async function sendImageToGroq(base64Data, prompt) {
         }
 
         saveScreenAnalysis(prompt, cleanedResponse, model);
+        if (currentProviderMode === 'groq-free') {
+            // La captura queda como contexto para las preguntas de seguimiento.
+            groqConversationHistory = [
+                {
+                    role: 'user',
+                    content: [
+                        { type: 'text', text: prompt },
+                        { type: 'image_url', image_url: { url: `data:${imageMime(base64Data)};base64,${base64Data}` } },
+                    ],
+                },
+                { role: 'assistant', content: cleanedResponse },
+            ];
+            screenContextPinned = true;
+            currentSystemPrompt = SCREEN_CHAT_PROMPT;
+        }
         logTransportEvent('groq.image.completed', {
             model,
             response: cleanedResponse,
@@ -1104,6 +1192,16 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
     global.geminiSessionRef = geminiSessionRef;
 
     ipcMain.handle('stt:set-paused', async (event, paused) => getStt().setPaused(paused));
+    ipcMain.handle('qa:clear', async () => {
+        getQuestionEngine().clear();
+        return true;
+    });
+    ipcMain.handle('screen:clear', async () => {
+        groqConversationHistory = [];
+        screenContextPinned = false;
+        currentSystemPrompt = NO_SCREEN_PROMPT;
+        return true;
+    });
     ipcMain.handle('stt:set-language', async (event, lang) => {
         sttLanguage = lang === 'en' ? 'en' : 'es';
         return sttLanguage;
@@ -1120,7 +1218,9 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
         }
         currentProviderMode = 'groq-free';
         initializeNewSession(profile, customPrompt);
-        currentSystemPrompt = getSystemPrompt(profile, customPrompt, false);
+        currentSystemPrompt = NO_SCREEN_PROMPT;
+        screenContextPinned = false;
+        getQuestionEngine().clear();
         getStt().start();
         console.log('[groq-free] Sesión iniciada (sin Gemini ni cloud)');
         return true;
@@ -1224,7 +1324,7 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
 
             if (currentProviderMode === 'groq-free') {
                 if (!hasGroqKey()) return { success: false, error: 'Falta la clave de Groq' };
-                return await sendImageToGroq(data, prompt);
+                return await sendImageToGroq(data, VISION_PROMPT);
             }
 
             if (currentProviderMode === 'local') {
@@ -1248,7 +1348,7 @@ function setupGeminiIpcHandlers(geminiSessionRef) {
         if (currentProviderMode === 'groq-free') {
             if (!hasGroqKey()) return { success: false, error: 'Falta la clave de Groq' };
             groqRequestStartedForTurn = true;
-            sendToGroq(text.trim());
+            sendToGroq(text.trim(), `**❓ ${text.trim()}**\n\n`);
             return { success: true };
         }
 
