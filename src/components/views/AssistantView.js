@@ -479,6 +479,130 @@ export class AssistantView extends LitElement {
             color: var(--text-muted);
             font-size: var(--font-size-xs);
         }
+
+        /* ── Tarjetas pregunta → respuesta ── */
+
+        .cards {
+            flex: 3;
+            overflow-y: auto;
+            padding: var(--space-sm) var(--space-md);
+            min-height: 0;
+        }
+
+        .card {
+            border: 1px solid var(--border);
+            border-left: 4px solid #3b82f6;
+            border-radius: 8px;
+            padding: 8px 10px;
+            margin-bottom: 10px;
+            background: var(--bg-elevated);
+            opacity: 0.6;
+            user-select: text;
+        }
+
+        .card * {
+            user-select: text;
+        }
+
+        .card.latest {
+            opacity: 1;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.35);
+        }
+
+        .card:hover {
+            opacity: 1;
+        }
+
+        .card-head {
+            display: flex;
+            gap: 6px;
+            font-size: var(--font-size-xs);
+            font-family: var(--font-mono);
+            color: #3b82f6;
+            margin-bottom: 4px;
+        }
+
+        .card-q {
+            font-weight: var(--font-weight-semibold);
+            color: var(--text-primary);
+            font-size: var(--font-size-sm);
+        }
+
+        .card-qes {
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+            font-style: italic;
+        }
+
+        .card-a {
+            margin-top: 6px;
+            padding-top: 6px;
+            border-top: 1px dashed var(--border);
+            font-size: var(--font-size-sm);
+            color: var(--text-primary);
+            line-height: 1.5;
+        }
+
+        .card-a p {
+            margin: 0 0 4px 0;
+        }
+
+        .card-a pre {
+            background: rgba(0, 0, 0, 0.35);
+            padding: 6px 8px;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-size: 12px;
+        }
+
+        .card details {
+            margin-top: 4px;
+            font-size: var(--font-size-xs);
+        }
+
+        .card summary {
+            cursor: pointer;
+            color: var(--text-muted);
+        }
+
+        .transcript-wrap {
+            flex: 2;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            border-top: 1px solid var(--border);
+        }
+
+        .transcript-wrap.collapsed {
+            flex: 0 0 auto;
+        }
+
+        .transcript-head {
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+            padding: 4px var(--space-md);
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .transcript {
+            font-size: var(--font-size-xs) !important;
+            color: var(--text-muted) !important;
+        }
+
+        .confirm {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: #f1c40f;
+            font-size: var(--font-size-xs);
+        }
+
+        .pill-btn.danger {
+            border-color: #e74c3c;
+            color: #e74c3c;
+        }
     `;
 
     static properties = {
@@ -493,6 +617,10 @@ export class AssistantView extends LitElement {
         _sttUsage: { state: true },
         _llmUsage: { state: true },
         _sttLang: { state: true },
+        _cards: { state: true },
+        _confirm: { state: true },
+        _showTranscript: { state: true },
+        _tick: { state: true },
     };
 
     constructor() {
@@ -508,6 +636,10 @@ export class AssistantView extends LitElement {
         this._sttUsage = null;
         this._llmUsage = null;
         this._sttLang = 'es';
+        this._cards = []; // más reciente primero; solo en memoria (F6)
+        this._confirm = null; // 'listen' | 'screen' | null
+        this._showTranscript = true;
+        this._tick = 0;
     }
 
     getProfileNames() {
@@ -639,8 +771,18 @@ export class AssistantView extends LitElement {
                     this._addTranscript({ kind: 'notice', text: st.message, at: Date.now() });
                 }
             };
-            this.handleSttUsage = (e, u) => (this._sttUsage = u);
-            this.handleLlmUsage = (e, u) => (this._llmUsage = u);
+            this.handleSttUsage = (e, u) => (this._sttUsage = { ...u, receivedAt: Date.now() });
+            this.handleLlmUsage = (e, u) => (this._llmUsage = { ...u, receivedAt: Date.now() });
+            this.handleQaCard = (e, card) => {
+                this._cards = [card, ...this._cards].slice(0, 100);
+                this.updateComplete.then(() => {
+                    const c = this.shadowRoot.querySelector('.cards');
+                    if (c) c.scrollTop = 0;
+                });
+            };
+            ipcRenderer.on('qa:card', this.handleQaCard);
+            // Recalcula cada 5 s los cupos que Groq va recargando.
+            this._tickTimer = setInterval(() => (this._tick = this._tick + 1), 5000);
             ipcRenderer.on('stt:segment', this.handleSttSegment);
             ipcRenderer.on('stt:status', this.handleSttStatus);
             ipcRenderer.on('stt:usage', this.handleSttUsage);
@@ -694,15 +836,26 @@ export class AssistantView extends LitElement {
         return html`<div class="bar"><span class=${cls} style="width:${pct}%"></span></div>`;
     }
 
+    // Groq recarga los cupos de forma continua: se estima el valor actual a partir del último dato.
+    _refill(remaining, limit, receivedAt, perDaySec) {
+        if (remaining === null || remaining === undefined || !limit || !receivedAt) return null;
+        const elapsedSec = (Date.now() - receivedAt) / 1000;
+        return Math.min(limit, remaining + elapsedSec * (limit / perDaySec));
+    }
+
     _renderUsage() {
+        void this._tick; // fuerza el recálculo periódico
         const u = this._sttUsage;
         const l = this._llmUsage;
-        const dayRemaining = u ? Math.max(0, u.dayAudioLimitSec - u.dayAudioSec) : null;
-        const hourRemaining = u ? u.hourRemainingAudioSec : null;
-        const llmReq = l && l.remainingRequestsDay !== null ? Number(l.remainingRequestsDay) : null;
+        const hourRemaining = u ? this._refill(u.hourRemainingAudioSec, u.hourAudioLimitSec, u.receivedAt, 3600) : null;
+        const dayRemaining = u ? this._refill(u.dayRemainingAudioSec, u.dayAudioLimitSec, u.receivedAt, 86400) : null;
         const llmLimit = l && l.limitRequestsDay !== null ? Number(l.limitRequestsDay) : null;
+        const llmReq = l && l.remainingRequestsDay !== null ? this._refill(Number(l.remainingRequestsDay), llmLimit, l.receivedAt, 86400) : null;
         return html`
-            <div class="usage" title="Voz que aún se puede transcribir (los silencios no cuentan). Hoy = estimación local; esta hora = dato de Groq.">
+            <div
+                class="usage"
+                title="Los cupos de Groq se recargan de forma continua (no a una hora fija) y son de la cuenta, no de la clave. Solo cuenta la voz enviada, no los silencios."
+            >
                 <div class="usage-row">
                     <span class="usage-label">Voz esta hora</span>
                     ${this._bar(hourRemaining, u && u.hourAudioLimitSec)}
@@ -714,10 +867,69 @@ export class AssistantView extends LitElement {
                     <span class="usage-val">${dayRemaining === null ? '—' : `quedan ≈${this._fmtDur(dayRemaining)}`}</span>
                 </div>
                 <div class="usage-row">
-                    <span class="usage-label">Capturas hoy</span>
+                    <span class="usage-label">IA hoy</span>
                     ${this._bar(llmReq, llmLimit)}
-                    <span class="usage-val">${llmReq === null ? 'sin datos aún' : `quedan ${llmReq} de ${llmLimit}`}</span>
+                    <span class="usage-val">${llmReq === null ? 'sin datos aún' : `quedan ${Math.floor(llmReq)} de ${llmLimit} peticiones`}</span>
                 </div>
+            </div>
+        `;
+    }
+
+    // ── Limpiar (con confirmación en el propio panel: un diálogo nativo saldría al compartir pantalla) ──
+
+    _askClear(which) {
+        this._confirm = which;
+        clearTimeout(this._confirmTimer);
+        this._confirmTimer = setTimeout(() => (this._confirm = null), 6000);
+    }
+
+    async _doClear(which) {
+        this._confirm = null;
+        const { ipcRenderer } = window.require('electron');
+        if (which === 'listen') {
+            this._cards = [];
+            this._transcript = [];
+            await ipcRenderer.invoke('qa:clear');
+        } else {
+            await ipcRenderer.invoke('screen:clear');
+            this.dispatchEvent(new CustomEvent('clear-screen', { bubbles: true, composed: true }));
+        }
+    }
+
+    _renderClear(which, label) {
+        if (this._confirm === which) {
+            return html`<span class="confirm"
+                >¿Borrar ${label}? No se puede deshacer.
+                <button class="pill-btn danger" @click=${() => this._doClear(which)}>Sí, borrar</button>
+                <button class="pill-btn" @click=${() => (this._confirm = null)}>Cancelar</button></span
+            >`;
+        }
+        return html`<button class="pill-btn" @click=${() => this._askClear(which)} title="Limpiar ${label}">🧹 Limpiar</button>`;
+    }
+
+    _md(text) {
+        if (!text) return '';
+        try {
+            return window.marked ? window.marked.parse(text) : text;
+        } catch (_) {
+            return text;
+        }
+    }
+
+    _renderCard(card, latest) {
+        const time = new Date(card.at).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+        return html`
+            <div class="card ${latest ? 'latest' : ''}">
+                <div class="card-head"><span>🟦 PREGUNTA · ${time}</span><span class="spacer"></span><span>#${card.id}</span></div>
+                <div class="card-q">${card.pregunta}</div>
+                ${card.pregunta_es ? html`<div class="card-qes">${card.pregunta_es}</div>` : ''}
+                <div class="card-a" .innerHTML=${this._md(card.respuesta_corta)}></div>
+                ${card.detalle
+                    ? html`<details>
+                          <summary>▸ ver detalle</summary>
+                          <div class="card-a" .innerHTML=${this._md(card.detalle)}></div>
+                      </details>`
+                    : ''}
             </div>
         `;
     }
@@ -737,18 +949,36 @@ export class AssistantView extends LitElement {
                     <button class="pill-btn ${this._sttLang === 'es' ? 'on' : ''}" @click=${() => this._setLang('es')} title="Idioma de la sesión">ES</button>
                     <button class="pill-btn ${this._sttLang === 'en' ? 'on' : ''}" @click=${() => this._setLang('en')} title="Idioma de la sesión">EN</button>
                     <button class="pill-btn" @click=${this._togglePause}>${st === 'paused' ? '▶ Reanudar' : '⏸ Pausar'}</button>
+                    ${this._confirm === 'listen' ? '' : this._renderClear('listen', 'preguntas y transcripción')}
                 </div>
+                ${this._confirm === 'listen'
+                    ? html`<div class="col-head">${this._renderClear('listen', 'preguntas y transcripción')}</div>`
+                    : ''}
                 ${this._renderUsage()}
-                <div class="transcript">
-                    ${this._transcript.length === 0
+                <div class="cards">
+                    ${this._cards.length === 0
                         ? html`<div class="empty">
-                              ${st === 'paused' ? 'Escucha en pausa: no se envía audio a Groq.' : 'Esperando voz del audio del sistema…'}
+                              ${st === 'paused'
+                                  ? 'Escucha en pausa: no se envía audio a Groq.'
+                                  : 'Las preguntas que se detecten aparecerán aquí con su respuesta (la más reciente arriba).'}
                           </div>`
-                        : this._transcript.map(item =>
-                              item.kind === 'notice'
-                                  ? html`<div class="notice">🟨 ${item.text}</div>`
-                                  : html`<div class="seg"><span class="seg-time">${fmtTime(item.at)}</span>${item.text}</div>`
-                          )}
+                        : this._cards.map((c, i) => this._renderCard(c, i === 0))}
+                </div>
+                <div class="transcript-wrap ${this._showTranscript ? '' : 'collapsed'}">
+                    <div class="transcript-head" @click=${() => (this._showTranscript = !this._showTranscript)}>
+                        ${this._showTranscript ? '▾' : '▸'} Transcripción en vivo (${this._transcript.filter(t => t.kind === 'seg').length})
+                    </div>
+                    ${this._showTranscript
+                        ? html`<div class="transcript">
+                              ${this._transcript.length === 0
+                                  ? html`<div class="empty">Esperando voz del audio del sistema…</div>`
+                                  : this._transcript.map(item =>
+                                        item.kind === 'notice'
+                                            ? html`<div class="notice">🟨 ${item.text}</div>`
+                                            : html`<div class="seg"><span class="seg-time">${fmtTime(item.at)}</span>${item.text}</div>`
+                                    )}
+                          </div>`
+                        : ''}
                 </div>
             </section>
         `;
@@ -768,6 +998,8 @@ export class AssistantView extends LitElement {
             if (this.handleSttStatus) ipcRenderer.removeListener('stt:status', this.handleSttStatus);
             if (this.handleSttUsage) ipcRenderer.removeListener('stt:usage', this.handleSttUsage);
             if (this.handleLlmUsage) ipcRenderer.removeListener('llm:usage', this.handleLlmUsage);
+            if (this.handleQaCard) ipcRenderer.removeListener('qa:card', this.handleQaCard);
+            if (this._tickTimer) clearInterval(this._tickTimer);
         }
     }
 
@@ -989,7 +1221,9 @@ export class AssistantView extends LitElement {
             <section class="col col-screen">
             <div class="col-head">
                 <span class="col-title">🖥️ Pantalla</span>
-                <span>Solo cuando tú lo pides (botón o Ctrl+Enter)</span>
+                ${this._confirm === 'screen' ? '' : html`<span>Solo cuando tú lo pides (botón o Ctrl+Enter)</span>`}
+                <span class="spacer"></span>
+                ${this._renderClear('screen', 'capturas y su chat')}
             </div>
             <div class="response-container" id="responseContainer"></div>
 
@@ -1014,7 +1248,7 @@ export class AssistantView extends LitElement {
                     <input
                         type="text"
                         id="textInput"
-                        placeholder="Type a message..."
+                        placeholder="Pregunta sobre la última captura…"
                         @keydown=${this.handleTextKeydown}
                     />
                 </div>

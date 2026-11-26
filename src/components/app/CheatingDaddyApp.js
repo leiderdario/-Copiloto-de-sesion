@@ -781,6 +781,11 @@ export class CheatingDaddyApp extends LitElement {
                         .onSendText=${msg => this.handleSendText(msg)}
                         .shouldAnimateResponse=${this.shouldAnimateResponse}
                         @response-index-changed=${this.handleResponseIndexChanged}
+                        @clear-screen=${() => {
+                            this.responses = [];
+                            this.currentResponseIndex = -1;
+                            this.requestUpdate();
+                        }}
                         @response-animation-complete=${() => {
                             this.shouldAnimateResponse = false;
                             this._currentResponseIsComplete = true;
