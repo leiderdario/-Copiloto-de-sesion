@@ -5,7 +5,8 @@ module.exports = {
     packagerConfig: {
         asar: true,
         extraResource: ['./src/assets/SystemAudioDump'],
-        name: 'Cheating Daddy',
+        name: 'Copiloto de sesion',
+        executableName: 'copiloto-de-sesion',
         icon: 'src/assets/logo',
         // use `security find-identity -v -p codesigning` to find your identity
         // for macos signing
@@ -30,9 +31,11 @@ module.exports = {
         {
             name: '@electron-forge/maker-squirrel',
             config: {
-                name: 'cheating-daddy',
-                productName: 'Cheating Daddy',
-                shortcutName: 'Cheating Daddy',
+                name: 'copiloto_de_sesion',
+                productName: 'Copiloto de sesion',
+                shortcutName: 'Copiloto de sesion',
+                setupExe: 'Copiloto-de-sesion-Setup.exe',
+                setupIcon: 'src/assets/logo.ico',
                 createDesktopShortcut: true,
                 createStartMenuShortcut: true,
             },
